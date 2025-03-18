@@ -1,410 +1,394 @@
 import datetime as dt
-from idlelib.configdialog import tracers
+from typing import Dict, Optional, List, Tuple
+from enum import Enum
 
 import numpy as np
+import pandas as pd
 from statsmodels.tsa.stattools import adfuller
 from scipy.stats import norm
 
-from pydantic import field_validator
-from loguru import logger
-from typing import Dict, Optional
-from typing_extensions import TypedDict
-from pydantic import BaseModel, Field, Extra
-
-from grt_lib_price_loader import Instrument
-from inar_strat_types import AbstractStratConfig, StratHistory, to_strat_history
-from grt_lib_orchestrator import AbstractBacktestStrategy
-from grt_lib_order_book import Trade
-import uuid
-
-
-class PairStrategyTrade(Trade):
-	def __init__(self):
-
-
-
-class PairTradingConfig(AbstractStratConfig):
-	class Config:
-		arbitrary_types_allowed = True
-
-		class UnderlyingDict(TypedDict):
-			base_date: dt.date
-			base_level: float
-			formation_period: int
-			k : int
-
-
-	# useful when parsing Instrument in risky_asset for example
-	# @field_validator('risky_asset', mode="before")
-	# def get_instrument(cls, v):
-	# 	if isinstance(v, list):
-	# 		return [ins if isinstance(ins, Instrument) else Instrument.from_ric(ins) for ins in v]
-	# 	return [v if isinstance(v, Instrument) else Instrument.from_ric(v)]
-
-class PairTradingCalculus(StratHistory):
-	normalized_prices : Dict[str, Dict[dt.date, float]] = {}
-	distance_measure :Dict[str, Dict[dt.date, float]] = {}
-	mean :Dict[str, Dict[dt.date, float]] = {}
-	var:Dict[str, Dict[dt.date, float]] = {}
-	covar :Dict[str, Dict[dt.date, float]] = {}
-	beta :Dict[str, Dict[dt.date, float]] = {}
-	resid :Dict[str, Dict[dt.date, float]] = {}
-	delta_resid :Dict[str, Dict[dt.date, float]] = {}
-	fuller_test :Dict[str, Dict[dt.date, float]] = {}
-	decision :Dict[str, Dict[dt.date, float]] = {}
-	spread :Dict[str, Dict[dt.date, float]] = {}
-	mean_spread :Dict[str, Dict[dt.date, float]] = {}
-	var_spread :Dict[str, Dict[dt.date, float]] = {}
-	threshold :Dict[str, Dict[dt.date, float]] = {}
-
-class StrategySignals(StratHistory):
-	Entry :Dict[dt.date, float] = {}
-	Exit : Dict[dt.date, float] = {}
-
-
-
-
-
-
-class PairTradingBackTest(StratHistory):
-	price_changes : Dict[str, Dict[dt.date, float]] = {}
-	weight_at_t : Dict[str, Dict[dt.date, float]] = {}
-	returns : Dict[str, Dict[dt.date, float]] = {}
-	sharpe_ratio : Dict[str, Dict[dt.date, float]] = {}
-	cumul_returns : Dict[str, Dict[dt.date, float]] = {}
-
-class PairTradingCost(StratHistory):
-	cost_bid_ask :Dict[str, Dict[dt.date, float]] = {}
-	fixed_fees :Dict[str, Dict[dt.date, float]] = {}
-	cost_slippage :Dict[str, Dict[dt.date, float]] = {}
-	mid_price :Dict[str, Dict[dt.date, float]] = {}
-	cost_total :Dict[str, Dict[dt.date, float]] = {}
-	net_returns :Dict[str, Dict[dt.date, float]] = {}
-
-class PairTradingRisk(StratHistory):
-	# to fill : Dict[dt.date, float] = {}
-
-
-
-class PairTradingHistory(StratHistory):
-	Pair_trading: PairTradingCalculus = PairTradingCalculus()
-	strategy_signals: StrategySignals = StrategySignals()
-	Back_test: PairTradingBackTest = PairTradingBackTest()
-	Trading_cost : PairTradingCost = PairTradingCost()
-	Risk_management: PairTradingRisk = PairTradingRisk()
-
-class PairTradingBacktestStrategy(AbstractBacktestStrategy):
-
-	config: PairTradingConfig
-	history: PairTradingHistory
-
-	"""Intermediate calculation Tools for strategy"""
-
-	def get_underlying_spot_price(self, underlying: Instrument, t: dt.date) -> float:
-		underlying_instrument = Instrument.from_ric(underlying)
-		return self.price_loader.get_price(t, underlying_instrument)
-
-	@to_strat_history("intermediate", lookup_attrs_count=2)
-	def calc_normalized_prices(self,underlying:Instrument,t:dt.date):
-		return (self.get_underlying_spot_price(underlying,t)/self.underlying.base_level
-
-	@to_strat_history("intermediate", lookup_attrs_count=3)
-	def calc_distance_measure(self, underlying_1: Instrument,underlying_2:Instrument, t: dt.date) -> float:
-		calc = 0
-		for i in range(self.underlying.formation_period):
-			tmi = self.calendar.busday_add(t,-i)
-			p1 = self.calc_normalized_prices(underlying_1, tmi)
-			p2 = self.calc_normalized_prices(underlying_2, tmi)
-			calc+=np.square(p1-p2)
-		return np.sqrt(calc)
-
-	def calc_mean(self,underlying:Instrument,t:dt.date)->float:
-		n = self.underlying.formation_period
-		sum_ = 0
-		for i in range(n):
-			tmi = self.calendar.busday_add(t,-i)
-			p_i = self.calc_normalized_prices(underlying,tmi)
-			sum_+=p_i
-		return sum_/n
-
-	def calc_var(self,underlying:Instrument,t:dt.date)->float:
-		n = self.underlying.formation_period
-		sum_ = 0
-		for i in range(n):
-			tmi = self.calendar.busday_add(t,-i)
-			p = self.calc_normalized_prices(underlying,tmi)
-			mu = self.calc_mean(underlying,tmi)
-			sum_+=np.square(p-mu)
-		return (1/n)*sum_
-
-	def calc_cov(self,underlying_1:Instrument,underlying_2 :Instrument,t:dt.date)->float:
-		n = self.underlying.formation_period
-		sum_=0
-		for i in range(n):
-			t_i = self.calendar.busday_add(t,i)
-			p_1_i = self.calc_normalized_prices(underlying_1,t)
-			p_2_i = self.calc_normalized_prices(underlying_2,t)
-			mu_1 = self.calc_mean(underlying_1,t_i)
-			mu_2 = self.calc_mean(underlying_2,t_i)
-			sum_ += (p_1_i-mu_1)*(p_2_i-mu_2)
-		return (1/n)*sum_
-
-	def calc_beta(self,underlying_1:Instrument,underlying_2:Instrument,t:dt.date)->float:
-		cov = self.calc_cov(underlying_1,underlying_2,t)
-		var = self.calc_var(underlying_2,t)
-		return cov/var
-
-	def calc_resid(self,underlying_1:Instrument,underlying_2:Instrument,t:dt.date)->float:
-		beta = self.calc_beta(underlying_1,underlying_2,t)
-		p_1 = self.calc_normalized_prices(underlying_1,t)
-		p_2 = self.calc_normalized_prices(underlying_1,t)
-		return 	p_1 - beta * p_2
-
-	def calc_delta_resid(self,underlying_1:Instrument,underlying_2:Instrument,t:dt.date)->float:
-		tm1 = self.calendar.busday_add(t,-1)
-		resid_t = self.calc_resid(underlying_1,underlying_2,t)
-		resid_tm1 = self.calc_resid(underlying_1,underlying_2,tm1)
-		return resid_t - resid_tm1
-
-
-
-	def ad_fuller_test(self,underlying_1:Instrument,underlying_2:Instrument,t:dt.date)->tuple[float, float, float]:
-		n =self.underlying.formation_period
-		residuals = []
-		for i in range(n):
-			tmi = self.calendar.busday_add(t,-i)
-			resid_i = self.calc_resid(underlying_1,underlying_2,tmi)
-			residuals.append(resid_i)
-
-		result = adfuller(residuals, maxlag=None, autolag='AIC')
-		adf_stat = result[0]  # Test statistic
-		p_value = result[1]  # p-value
-		critical_values = result[4]
-
-		return adf_stat,p_value,critical_values
-
-	def criteria_decision(self,underlying_1:Instrument,underlying_2:Instrument,t:dt.date)->bool:
-		adf_test = self.ad_fuller_test(underlying_1,underlying_2,t)
-
-		if adf_test[0] > adf_test[2]:
-			return True   # stationary
-		else:
-			return False  # not stationary
-		######################################
-	def calc_spread(self,underlying_1:Instrument,underlying_2:Instrument,t:dt.date)->float:
-		p_1 = self.calc_normalized_prices(underlying_1,t)
-		p_2 = self.calc_normalized_prices(underlying_1,t)
-		return p_1 - p_2
-
-	def calc_mean_spread(self,underlying_1:Instrument,underlying_2:Instrument,t:dt.date)->float:
-		n = self.underlying.formation_period
-		total = 0
-		for i in range(n):
-			tmi = self.calendar.busday_add(t,-i)
-			p_1_i = self.calc_normalized_prices(underlying_1,tmi)
-			p_2_i = self.calc_normalized_prices(underlying_2,tmi)
-			spread = p_1_i - p_2_i
-			total += spread
-		return total / n
-
-	def calc_var_spread(self,underlying_1:Instrument,underlying_2: Instrument,t:dt.date)->float:
-		n = self.underlying.formation_period
-		sum_ = 0
-		for i in range(n):
-			tmi = self.calendar.busday_add(t, -i)
-			p_1_i = self.calc_normalized_prices(underlying_1,tmi)
-			p_2_i = self.calc_normalized_prices(underlying_1,tmi)
-			spread = p_1_i - p_2_i
-			mu = self.calc_mean_spread(underlying_1,underlying_2, tmi)
-			sum_ += np.square(spread - mu)
-		return (1 / n) * sum_
-
-	def calc_threshold(self,underlying_1:Instrument,underlying_2:Instrument,t:dt.date, k : float,type_:str ="long"):
-		mean = self.calc_mean_spread(underlying_1,underlying_2, t)
-		vol =np.sqrt(self.calc_var_spread(underlying_1,underlying_2, t))
-		if type_ == "long":
-			return mean - k * vol
-		elif type_ == "short":
-			return mean + k * vol
-		else:
-			return TypeError("Please enter a correct value for type_, either long or short")
-
-	"""Trading Strategy Section Tools"""
-
-
-	def strategy(self,underlying_1:Instrument,underlying_2:Instrument,t:dt.date)->AbstractStratConfig:
-		spread = self.calc_var_spread(underlying_1,underlying_2, t)
-		mean_spread = self.calc_mean_spread(underlying_1,underlying_2, t)
-		var_spread = self.calc_var_spread(underlying_1,underlying_2, t)
-		k = self.underlying.threshold_parameter
-		# long position entry conditions
-		if spread > mean_spread + k *np.sqrt(var_spread):
-			entry_price = self.get_underlying_spot_price(underlying_1,t)
-			long = self.OrderBook.open_position("stock",entry_price )
-		elif spread > mean_spread - k * np.sqrt(var_spread):
-
-
-
-	"""backtest Section tools"""
-	def get_number_of_shares(self,identifier:uuid.UUID)->int:
-		trade = self.OrderBook.find_trade_by_identifier(identifier)
-		return trade.number_of_shares()
-	def get_entry_price(self,identifier:uuid.UUID)->float:
-		trade = self.OrderBook.find_trade_by_identifier(identifier)
-		return trade.entry_price()
-
-	"""backtest Section tools"""
-
-	def calc_price_change(self,underlying_1:Instrument,t:dt.date)->float:
-		spot = self.get_underlying_spot_price(underlying_1,t)
-		tm1 = self.calendar.busday_add(t,-1)
-		spot_tm1 = self.calc_spot_price(underlying_1,tm1)
-		return (spot - spot_tm1)/spot_tm1
-
-	def calc_porfolio_value(self,underlying_1:Instrument,underlying_2:Instrument,t:dt.date,identifier_1:uuid.UUID,identifier_2:uuid.UUID)->float:
-
-		number_1 = self.get_number_of_shares(identifier_1)
-		number_2 = self.get_number_of_shares(identifier_2)
-		spot_1 = self.get_underlying_spot_price(underlying_1, t)
-		spot_2 = self.get_underlying_spot_price(underlying_2, t)
-		value_1 = spot_1 * number_1
-		value_2 = spot_2 * number_2
-		return value_1 + value_2
-
-	def calc_weight_at_t(self,underlying_1:Instrument,underlying_2:Instrument,t:dt.date,identifier_1:uuid.UUID,identifier_2:uuid.UUID)->float:
-		number_1 = self.get_number_of_shares(identifier_1)
-		number_2 = self.get_number_of_shares(identifier_2)
-		spot_1 = self.get_underlying_spot_price(underlying_1,t)
-		spot_2 = self.get_underlying_spot_price(underlying_2,t)
-		value_1 = spot_1 * number_1
-		value_2 = spot_2 * number_2
-		return value_1 / (value_1 + value_2)
-
-	def calc_returns(self,underlying_1:Instrument,underlying_2:Instrument,t:dt.date,identifier_1:uuid.UUID,identifier_2:uuid.UUID)->float:
-		weight_1 = self.calc_weight_at_t(underlying_1,underlying_2,t,identifier_1,identifier_2)
-		weight_2 = self.calc_weight_at_t(underlying_2,underlying_1,t,identifier_2,identifier_1)
-		price_1 = self.calc_price_change(underlying_1,t)
-		price_2 = self.calc_price_change(underlying_2,t)
-		return weight_1 * price_1 + weight_2 * price_2
-
-	def calc_cumul_returns(self,underlying_1:Instrument,underlying_2: Instrument, t:dt.date,identifier_1:uuid.UUID,identifier_2:uuid.UUID)->float:
-		ret = 1
-		n = self.underlying.formation_period
-		for i in range(n):
-			tmi = self.calendar.busday_add(t,-i)
-			daily_ret = self.calc_returns(underlying_1,underlying_2,tmi,identifier_1,identifier_2)
-			ret*= (1+daily_ret)-1
-		return ret
-
-	def sharpe_ratio(self,underlying_1:Instrument,underlying_2: Instrument, t:dt.date,identifier_1:uuid.UUID,identifier_2:uuid.UUID,risk_free_rate : float):
-		daily_ret = self.calc_returns(underlying_1, underlying_2, t, identifier_1, identifier_2)
-		mean_ret = daily_ret.mean()
-		vol = daily_ret.std(ddof=0)
-		return mean_ret - risk_free_rate / vol
-
-	"""Transaction Cost Section Tools"""
-	def calc_cost_bid_ask(self,instrument_ric:str,t:dt.date):
-		instrument = Instrument.from_ric(instrument_ric)
-		bid_price = self.price_loader.get_price(t,instrument,"Bid")
-		ask_price = self.price_loader.get_price(t,instrument,"Ask")
-		spread = ask_price - bid_price
-		mid_price = (ask_price + bid_price)/2
-		return spread/mid_price
-
-	def calc_fixed_fees(self,identifier :uuid.UUID )->float:
-		trade = self.OrderBook.find_trade_by_identifier(identifier)
-		broker_fees = trade.broker_fees()
-		number_of_shares = self.get_number_of_shares(identifier)
-
-		return broker_fees * number_of_shares
-
-	def calc_mid_price(self,instrument_ric:str,t:dt.date):
-		instrument = Instrument.from_ric(instrument_ric)
-		bid_price = self.price_loader.get_price(t, instrument, "Bid")
-		ask_price = self.price_loader.get_price(t, instrument, "Ask")
-		return (ask_price + bid_price) / 2
-
-	def calc_cost_slippage(self,instrument_ric:str,t:dt.date,identifier :uuid.UUID):
-		instrument = Instrument.from_ric(instrument_ric)
-		mid_price = self.calc_mid_price(instrument,t)
-		execution_price = self.get_entry_price(identifier)         ########### pas clair
-		return abs(execution_price - mid_price)/mid_price
-
-	def calc_cost_total(self,instrument_ric:str,t:dt.date,identifier :uuid.UUID):
-		instrument = Instrument.from_ric(instrument_ric)
-		fixed_fees = self.calc_fixed_fees(identifier)
-		slippage = self.calc_cost_slippage(instrument_ric,t,identifier)
-		bid_ask_cost = self.calc_cost_bid_ask(instrument,t)
-		return fixed_fees + slippage + bid_ask_cost
-
-	def calc_net_returns(self,underlying_1:Instrument,underlying_2:Instrument,t:dt.date,identifier_1:uuid.UUID,identifier_2:uuid.UUID)->float:
-		gross_rets = self.calc_returns(underlying_1,underlying_2,t,identifier_1,identifier_2)
-		transaction_costs = self.calc_cost_total(underlying_1,t,identifier_1)
-		return gross_rets-transaction_costs
-
-	"""Risk Management Section Tools"""
-	def calc_VaR(self,underlying_1:Instrument,underlying_2:Instrument,t:dt.date,confidence_level:float,period:int = 7)->float:
-		cumul_rets = self.calc_cumulative_returns(underlying_1,underlying_2,t)
-		std_ret = cumul_rets.std(ddof=0)
-		z_score = norm.ppf(confidence_level)
-		return -std_ret*z_score*np.srt(period)
-
-
-	def calc_max_allowable_loss(self,risk_tolerance,underlying_1:Instrument,underlying_2:Instrument,t:dt.date,identifier_1:uuid.UUID,identifier_2:uuid.UUID):
-		portfolio_value = self.calc_porfolio_value(underlying_1,underlying_2,t,identifier_1,identifier_2)
-		return portfolio_value * risk_tolerance
-
-	def calc_leverage_limits(self,underlying_1:Instrument,underlying_2:Instrument,t:dt.date,confidence_level:float,period:int = 7,identifier_1:uuid.UUID,identifier_2:uuid.UUID)->float:
-		VaR = self.calc_VaR(underlying_1,underlying_2,t,confidence_level,period)
-		max_loss = self.calc_max_allowable_loss(VaR,underlying_1,underlying_2,t,identifier_1,identifier_2)
-		return VaR/max_loss
-
-	def calc_equity(self,underlying_1:Instrument,underlying_2:Instrument,t:dt.date,identifier_1:uuid.UUID,identifier_2:uuid.UUID)->float:
-		gross_portfolio_value = self.portfolio_value(underlying_1,underlying_2,t,identifier_1,identifier_2)
-		liabilities = self.#get liabilities
-		return gross_portfolio_value - liabilities
-
-	def calc_portfolio_leverage(self,underlying_1:Instrument,underlying_2:Instrument,t:dt.date,identifier_1:uuid.UUID,identifier_2:uuid.UUID):
-		gross_portfolio_value = self.calc_porfolio_value(underlying_1,underlying_2,t,identifier_1,identifier_2)
-		equity = self.calc_equity(underlying_1,underlying_2,t,identifier_1,identifier_2)
-		return gross_portfolio_value/equity
-
-	def calc_adjusted_exposure(self,underlying_1:Instrument,underlying_2:Instrument,t:dt.date,identifier:uuid.UUID,confidence_level:float,period:int = 7)->float:
-		trade = self.OrderBook.find_trade_by_identifier(identifier)
-		VaR = self.calc_VaR(underlying_1,underlying_2,t,confidence_level,period)
-		current_exposure = trade.current_exposure()
-		max_allowable_exposure = self.calc_max_allowable_exposure(trade,identifier,t)
-		return (max_allowable_exposure/VaR)*current_exposure
-
-	def calc_stop_loss_VaR(self,underlying_1:Instrument,underlying_2:Instrument,identifier_1:uuid.UUID,identifier_2:uuid.UUID,t:dt.date,confidence_level:float,period:int = 7)->float:
-		VaR = self.calc_VaR(underlying_1,underlying_2,t,confidence_level)
-		portfolio_value = self.calc_porfolio_value(underlying_1,underlying_2,t,identifier_1,identifier_2)
-		return portfolio_value * VaR
-
-	def calc_max_cumul_returns(self,underlying_1:Instrument,underlying_2: Instrument, t:dt.date,identifier_1:uuid.UUID,identifier_2:uuid.UUID)->float:
-		n = self.underlying.formation_period
-		highest = 0
-		for i in range(n):
-			tmi = self.calendar.busday_add(t,-i)
-			cumul = self.calc_cumul_returns(underlying_1,underlying_2,tmi,identifier_1,identifier_2)
-			if cumul > highest:
-				highest = cumul
-		return highest
-
-	def calc_drawdown(self,underlying_1:Instrument,underlying_2: Instrument, t:dt.date,identifier_1:uuid.UUID,identifier_2:uuid.UUID)->float:
-		max_cumul = self.calc_max_cumul_returns(underlying_1,underlying_2,t,identifier_1,identifier_2)
-		cumul = self.calc_cumul_returns(underlying_1,underlying_2,t,identifier_1,identifier_2)
-		return 1-(cumul/max_cumul)
-
-	def calc_max_drawdown(self,underlying_1:Instrument,underlying_2: Instrument, t:dt.date,identifier_1:uuid.UUID,identifier_2:uuid.UUID)->float:
-		maximum = 0
-		n = self.underlying.formation_period
-		for i in range(n):
-			tmi = self.calendar.busday_add(t,-i)
-			drawdown = self.calc_drawdown(underlying_1,underlying_2,tmi,identifier_1,identifier_2)
-			if drawdown > maximum:
-				maximum = drawdown
-		return maximum
-
-	def calc_max_divergence(self,):
-		#flemme de zinzin
+from pydantic import BaseModel, Field
+
+from nautilus_trader.common.instruments import Instrument, Quantity
+from nautilus_trader.common.enums import OrderSide, OrderType, PositionSide
+from nautilus_trader.trading.strategy import Strategy
+from nautilus_trader.model.data import Bar
+from nautilus_trader.trading.execution_commands import LimitOrderCommand, MarketOrderCommand
+from nautilus_trader.trading.position import Position
+from nautilus_trader.common.timeframes import Timeframe
+from nautilus_trader.common.periods import Period
+from nautilus_trader.common.frequency import Frequency
+from nautilus_trader.common.component import Component
+
+class PairTradingConfig(BaseModel):
+    underlying_1: str = Field("AAPL.US", description="Ticker of the first underlying asset")
+    underlying_2: str = Field("SPY.US", description="Ticker of the second underlying asset")
+    base_date: dt.date = Field(dt.date(2023, 1, 1), description="Date for price normalization")
+    base_level: float = Field(100.0, description="Base level for price normalization")
+    formation_period: int = Field(252, description="Number of days for the formation period")
+    entry_threshold_std: float = Field(2.0, description="Entry threshold for residuals (in standard deviations)")
+    exit_threshold_abs: float = Field(0.5, description="Exit threshold for absolute residual value")
+    max_holding_days: int = Field(30, description="Maximum number of days to hold a position")
+    residual_window: int = Field(20, description="Window size for calculating residual mean and standard deviation")
+    beta_window: int = Field(60, description="Window size for calculating dynamic beta")
+    transaction_cost_per_share: float = Field(0.01, description="Transaction cost per share")
+    profit_target_multiplier: Optional[float] = Field(1.0, description="Multiplier for setting profit target based on entry residual")
+    stop_loss_multiplier: Optional[float] = Field(1.0, description="Multiplier for setting stop loss based on entry residual")
+    position_size: int = Field(100, description="Number of shares to trade")
+    trailing_stop_loss_atr_period: int = Field(14, description="Period for ATR calculation for trailing stop loss")
+    trailing_stop_loss_atr_multiplier: float = Field(2.0, description="Multiplier for ATR to set trailing stop loss")
+    risk_free_rate: float = Field(0.02, description="Annual risk-free rate for Sharpe ratio calculation")
+    volatility_lookback_days: int = Field(90, description="Lookback window for volatility calculation")
+    adf_critical_level: float = Field(0.05, description="P-value threshold for ADF test stationarity")
+    lag_correlation_window: int = Field(30, description="Window for lagged correlation analysis")
+    max_leverage: float = Field(2.0, description="Maximum allowable leverage")
+    initial_capital: float = Field(100000.0, description="Initial capital for backtesting")
+
+class PairTradingStrategy(Strategy):
+    config: PairTradingConfig
+    instrument1: Instrument
+    instrument2: Instrument
+    normalized_prices: Dict[dt.date, Dict[str, float]] = {}
+    spreads: Dict[dt.date, float] = {}
+    betas: Dict[dt.date, float] = {}
+    residuals: Dict[dt.date, float] = {}
+    position_entry_date: Optional[dt.date] = None
+    entry_residual: Optional[float] = None
+    trailing_stop_loss: Optional[float] = None
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.config = PairTradingConfig(**self.config)
+        self.instrument1 = self.engine.get_instrument(self.config.underlying_1)
+        self.instrument2 = self.engine.get_instrument(self.config.underlying_2)
+        if not self.instrument1 or not self.instrument2:
+            raise ValueError("One or both instruments not found.")
+        self.normalized_prices = {}
+        self.spreads = {}
+        self.betas = {}
+        self.residuals = {}
+        self.position_entry_date = None
+        self.entry_residual = None
+        self.trailing_stop_loss = None
+        self.portfolio_value_history: Dict[dt.date, float] = {}
+        self.returns_history: Dict[dt.date, float] = {}
+        self.cumulative_returns_history: Dict[dt.date, float] = {}
+        self.drawdown_history: Dict[dt.date, float] = {}
+        self.max_drawdown = 0.0
+        self.transaction_costs_history: Dict[dt.date, float] = {}
+        self.total_profit = 0.0
+        self.equity = self.config.initial_capital
+        self.positions_history: Dict[dt.date, Optional[Position]] = {}
+
+    def get_price(self, instrument: Instrument, bar: Bar) -> float:
+        if bar and bar.instrument_id == instrument.instrument_id:
+            return bar.close
+        return np.nan
+
+    def normalize_price(self, instrument: Instrument, date: dt.date) -> Optional[float]:
+        history = self.engine.get_historical_data(
+            instrument=instrument,
+            timeframe=Timeframe.DAILY,
+            period=Period.since(self.config.base_date),
+        )
+        df = pd.DataFrame([{'ts': bar.ts, 'close': bar.close} for bar in history])
+        df['ts'] = pd.to_datetime(df['ts']).dt.date
+        df = df.set_index('ts')
+        if date in df.index:
+            base_history = self.engine.get_historical_data(
+                instrument=instrument,
+                timeframe=Timeframe.DAILY,
+                period=Period.since(self.config.base_date),
+            )
+            base_df = pd.DataFrame([{'ts': bar.ts, 'close': bar.close} for bar in base_history])
+            base_df['ts'] = pd.to_datetime(base_df['ts']).dt.date
+            base_df = base_df.set_index('ts')
+            if self.config.base_date in base_df.index and date in df.index:
+                base_price = base_df.loc[self.config.base_date, 'close']
+                current_price = df.loc[date, 'close']
+                normalized_price = (current_price / base_price) * self.config.base_level
+                self.normalized_prices.setdefault(date, {})[instrument.symbol] = normalized_price
+                return normalized_price
+        return None
+
+    def calculate_spread(self, date: dt.date) -> Optional[float]:
+        price1 = self.normalize_price(self.instrument1, date)
+        price2 = self.normalize_price(self.instrument2, date)
+        if price1 is not None and price2 is not None:
+            spread = price1 - price2
+            self.spreads[date] = spread
+            return spread
+        return None
+
+    def calculate_dynamic_beta(self, history_length: int) -> Optional[float]:
+        dates = sorted(self.normalized_prices.keys())[-history_length:]
+        if len(dates) < self.config.beta_window:
+            return None
+        prices1 = [self.normalized_prices[d].get(self.instrument1.symbol) for d in dates if self.normalized_prices[d].get(self.instrument1.symbol) is not None and self.normalized_prices[d].get(self.instrument2.symbol) is not None]
+        prices2 = [self.normalized_prices[d].get(self.instrument2.symbol) for d in dates if self.normalized_prices[d].get(self.instrument1.symbol) is not None and self.normalized_prices[d].get(self.instrument2.symbol) is not None]
+
+        if len(prices1) < self.config.beta_window or len(prices2) < self.config.beta_window:
+            return None
+
+        returns1 = np.diff(np.log(prices1[-self.config.beta_window:]))
+        returns2 = np.diff(np.log(prices2[-self.config.beta_window:]))
+
+        if len(returns2) > 0:
+            beta, alpha = np.polyfit(returns2, returns1, 1)
+            return beta
+        return None
+
+    def calculate_residual(self, date: dt.date) -> Optional[float]:
+        beta = self.calculate_dynamic_beta(self.config.beta_window + self.config.residual_window)
+        price1 = self.normalize_price(self.instrument1, date)
+        price2 = self.normalize_price(self.instrument2, date)
+        if beta is not None and price1 is not None and price2 is not None:
+            residual = price1 - beta * price2
+            self.residuals[date] = residual
+            self.betas[date] = beta
+            return residual
+        return None
+
+    def calculate_residual_zscore(self, date: dt.date) -> Optional[float]:
+        residual_history = pd.Series(self.residuals).sort_index()
+        residual_window_data = residual_history[residual_history.index <= date].last(f'{self.config.residual_window}D')
+        if len(residual_window_data) < self.config.residual_window:
+            return None
+        mean_resid = residual_window_data.mean()
+        std_resid = residual_window_data.std()
+        current_residual = self.residuals.get(date)
+        if current_residual is not None and std_resid != 0:
+            return (current_residual - mean_resid) / std_resid
+        return None
+
+    def on_bar(self, bar: Bar):
+        trade_date = bar.trade_date.date()
+        self.calculate_spread(trade_date)
+        residual = self.calculate_residual(trade_date)
+        if residual is None:
+            return
+
+        zscore = self.calculate_residual_zscore(trade_date)
+        if zscore is None:
+            return
+
+        current_position = self.get_position(self.instrument1)
+
+        # Exit Logic
+        if current_position:
+            if self.position_entry_date and (trade_date - self.position_entry_date).days >= self.config.max_holding_days:
+                self.close_position(self.instrument1)
+                return
+
+            if self.entry_residual is not None:
+                if self.config.profit_target_multiplier is not None:
+                    profit_target = self.entry_residual * self.config.profit_target_multiplier
+                    if (self.entry_residual > 0 and residual <= profit_target) or (self.entry_residual < 0 and residual >= profit_target):
+                        self.close_position(self.instrument1)
+                        return
+                if self.config.stop_loss_multiplier is not None:
+                    stop_loss = self.entry_residual * self.config.stop_loss_multiplier * -1 # Stop loss is in the opposite direction
+                    if (self.entry_residual > 0 and residual >= stop_loss) or (self.entry_residual < 0 and residual <= stop_loss):
+                        self.close_position(self.instrument1)
+                        return
+                if self.config.exit_threshold_abs is not None and abs(residual) <= self.config.exit_threshold_abs:
+                    self.close_position(self.instrument1)
+                    return
+
+                # Trailing Stop Loss
+                if self.config.trailing_stop_loss_atr_multiplier > 0 and self.config.trailing_stop_loss_atr_period > 0:
+                    history1 = self.engine.get_historical_data(instrument=self.instrument1, timeframe=Timeframe.DAILY, period=Period.since(trade_date - dt.timedelta(days=self.config.trailing_stop_loss_atr_period + 5)))
+                    df_hist1 = pd.DataFrame([{'ts': h_bar.ts, 'high': h_bar.high, 'low': h_bar.low, 'close': h_bar.close} for h_bar in history1])
+                    if not df_hist1.empty:
+                        df_hist1['ts'] = pd.to_datetime(df_hist1['ts']).dt.date
+                        df_hist1.set_index('ts', inplace=True)
+                        df_hist1 = df_hist1[~df_hist1.index.duplicated(keep='last')]
+                        df_hist1 = df_hist1.sort_index()
+                        df_window = df_hist1.loc[:trade_date].tail(self.config.trailing_stop_loss_atr_period)
+                        if len(df_window) == self.config.trailing_stop_loss_atr_period:
+                            high = df_window['high'].max()
+                            low = df_window['low'].min()
+                            atr = (high - low) / 2 # Simple approximation
+                            if current_position.side == PositionSide.LONG and self.trailing_stop_loss is not None:
+                                self.trailing_stop_loss = max(self.trailing_stop_loss, bar.close - atr * self.config.trailing_stop_loss_atr_multiplier)
+                                if bar.close <= self.trailing_stop_loss:
+                                    self.close_position(self.instrument1)
+                                    return
+                            elif current_position.side == PositionSide.SHORT and self.trailing_stop_loss is not None:
+                                self.trailing_stop_loss = min(self.trailing_stop_loss, bar.close + atr * self.config.trailing_stop_loss_atr_multiplier)
+                                if bar.close >= self.trailing_stop_loss:
+                                    self.close_position(self.instrument1)
+                                    return
+
+
+        # Entry Logic
+        if not current_position:
+            if zscore > self.config.entry_threshold_std:
+                # Short the spread (short underlying_1, long underlying_2)
+                quantity1 = Quantity.from_int(self.config.position_size * -1)
+                quantity2 = Quantity.from_int(int(abs(self.config.position_size * self.betas.get(trade_date, 1.0))))
+                if quantity2 > 0:
+                    self.submit_order(LimitOrderCommand(self.instrument1, OrderSide.SELL, quantity1, bar.close))
+                    self.submit_order(LimitOrderCommand(self.instrument2, OrderSide.BUY, quantity2, bar.close))
+                    self.position_entry_date = trade_date
+                    self.entry_residual = residual
+                    # Initial trailing stop loss for short position
+                    history1 = self.engine.get_historical_data(instrument=self.instrument1, timeframe=Timeframe.DAILY, period=Period.since(trade_date - dt.timedelta(days=self.config.trailing_stop_loss_atr_period + 5)))
+                    df_hist1 = pd.DataFrame([{'ts': h_bar.ts, 'high': h_bar.high, 'low': h_bar.low, 'close': h_bar.close} for h_bar in history1])
+                    if not df_hist1.empty:
+                        df_hist1['ts'] = pd.to_datetime(df_hist1['ts']).dt.date
+                        df_hist1.set_index('ts', inplace=True)
+                        df_hist1 = df_hist1[~df_hist1.index.duplicated(keep='last')]
+                        df_hist1 = df_hist1.sort_index()
+                        df_window = df_hist1.loc[:trade_date].tail(self.config.trailing_stop_loss_atr_period)
+                        if len(df_window) == self.config.trailing_stop_loss_atr_period:
+                            low = df_window['low'].min()
+                            atr = (df_window['high'].max() - low) / 2
+                            self.trailing_stop_loss = bar.close + atr * self.config.trailing_stop_loss_atr_multiplier
+
+
+            elif zscore < -self.config.entry_threshold_std:
+                # Long the spread (long underlying_1, short underlying_2)
+                quantity1 = Quantity.from_int(self.config.position_size)
+                quantity2 = Quantity.from_int(int(abs(self.config.position_size * self.betas.get(trade_date, 1.0))) * -1)
+                if quantity2 < 0:
+                    self.submit_order(LimitOrderCommand(self.instrument1, OrderSide.BUY, quantity1, bar.close))
+                    self.submit_order(LimitOrderCommand(self.instrument2, OrderSide.SELL, quantity2, bar.close))
+                    self.position_entry_date = trade_date
+                    self.entry_residual = residual
+                    # Initial trailing stop loss for long position
+                    history1 = self.engine.get_historical_data(instrument=self.instrument1, timeframe=Timeframe.DAILY, period=Period.since(trade_date - dt.timedelta(days=self.config.trailing_stop_loss_atr_period + 5)))
+                    df_hist1 = pd.DataFrame([{'ts': h_bar.ts, 'high': h_bar.high, 'low': h_bar.low, 'close': h_bar.close} for h_bar in history1])
+                    if not df_hist1.empty:
+                        df_hist1['ts'] = pd.to_datetime(df_hist1['ts']).dt.date
+                        df_hist1.set_index('ts', inplace=True)
+                        df_hist1 = df_hist1[~df_hist1.index.duplicated(keep='last')]
+                        df_hist1 = df_hist1.sort_index()
+                        df_window = df_hist1.loc[:trade_date].tail(self.config.trailing_stop_loss_atr_period)
+                        if len(df_window) == self.config.trailing_stop_loss_atr_period:
+                            high = df_window['high'].max()
+                            atr = (high - df_window['low'].min()) / 2
+                            self.trailing_stop_loss = bar.close - atr * self.config.trailing_stop_loss_atr_multiplier
+
+    def close_position(self, instrument: Instrument):
+        position = self.get_position(instrument)
+        if position:
+            if position.side == PositionSide.LONG:
+                self.submit_order(MarketOrderCommand(instrument, OrderSide.SELL, position.net_quantity))
+            elif position.side == PositionSide.SHORT:
+                self.submit_order(MarketOrderCommand(instrument, OrderSide.BUY, abs(position.net_quantity)))
+            self.position_entry_date = None
+            self.entry_residual = None
+            self.trailing_stop_loss = None
+
+    def on_trade(self, trade: Trade):
+        self.positions_history[trade.trade_date.date()] = self.get_position(trade.instrument)
+        cost = abs(trade.quantity) * self.config.transaction_cost_per_share
+        self.transaction_costs_history.setdefault(trade.trade_date.date(), 0.0)
+        self.transaction_costs_history[trade.trade_date.date()] += cost
+        if self.position_entry_date is not None and trade.instrument == self.instrument1:
+            pass # Track entry price and size if needed
+
+    def on_bar_market_data(self, bar: Bar):
+        trade_date = bar.trade_date.date()
+        portfolio_value = self.calculate_portfolio_value(trade_date)
+        self.portfolio_value_history[trade_date] = portfolio_value
+        self.calculate_returns(trade_date, portfolio_value)
+        self.calculate_cumulative_returns(trade_date)
+        self.calculate_drawdown(trade_date)
+        self.equity = portfolio_value - sum(t_cost for t_cost in self.transaction_costs_history.values())
+
+    def calculate_portfolio_value(self, date: dt.date) -> float:
+        value = self.config.initial_capital
+        position1 = self.get_position(self.instrument1)
+        position2 = self.get_position(self.instrument2)
+        price1 = self.get_price_at_date(self.instrument1, date)
+        price2 = self.get_price_at_date(self.instrument2, date)
+
+        if position1 and price1 is not None:
+            value += position1.net_quantity * price1
+        if position2 and price2 is not None:
+            value += position2.net_quantity * price2
+        return value
+
+    def get_price_at_date(self, instrument: Instrument, date: dt.date) -> Optional[float]:
+        history = self.engine.get_historical_data(
+            instrument=instrument,
+            timeframe=Timeframe.DAILY,
+            period=Period.since(self.config.base_date),
+        )
+        df = pd.DataFrame([{'ts': bar.ts, 'close': bar.close} for bar in history])
+        df['ts'] = pd.to_datetime(df['ts']).dt.date
+        df = df.set_index('ts')
+        if date in df.index:
+            return df.loc[date, 'close']
+        return None
+
+    def calculate_returns(self, date: dt.date, current_portfolio_value: float):
+        previous_date = self.engine.time_handler.previous_business_day(date)
+        previous_portfolio_value = self.portfolio_value_history.get(previous_date, self.config.initial_capital)
+        if previous_portfolio_value != 0:
+            returns = (current_portfolio_value - previous_portfolio_value) / previous_portfolio_value
+            self.returns_history[date] = returns
+
+    def calculate_cumulative_returns(self, date: dt.date):
+        cumulative_return = (self.portfolio_value_history[date] / self.config.initial_capital) - 1
+        self.cumulative_returns_history[date] = cumulative_return
+
+    def calculate_drawdown(self, date: dt.date):
+        cumulative_returns = pd.Series(self.cumulative_returns_history).sort_index()
+        if cumulative_returns.empty:
+            return
+        peak = cumulative_returns[:date].max() if date in cumulative_returns else 0
+        current_return = cumulative_returns.get(date, 0)
+        drawdown = peak - current_return
+        self.drawdown_history[date] = drawdown
+        self.max_drawdown = max(self.max_drawdown, drawdown)
+
+    def calculate_sharpe_ratio(self, lookback_days: int = 252) -> Optional[float]:
+        returns_series = pd.Series(self.returns_history).sort_index().tail(lookback_days)
+        if len(returns_series) < 2:
+            return None
+        mean_return = returns_series.mean()
+        std_dev_return = returns_series.std()
+        if std_dev_return == 0:
+            return None
+        annualized_mean_return = mean_return * 252
+        annualized_std_dev_return = std_dev_return * np.sqrt(252)
+        sharpe = (annualized_mean_return - self.config.risk_free_rate) / annualized_std_dev_return
+        return sharpe
+
+    def calculate_volatility(self, lookback_days: int = 90) -> Optional[float]:
+        returns_series = pd.Series(self.returns_history).sort_index().tail(lookback_days)
+        if len(returns_series) < 2:
+            return None
+        return returns_series.std() * np.sqrt(252)
+
+    def perform_adf_test(self, lookback_days: int = 252) -> Optional[Tuple[float, float]]:
+        spread_series = pd.Series(self.spreads).sort_index().tail(lookback_days).dropna()
+        if len(spread_series) < self.config.formation_period:
+            return None
+        result = adfuller(spread_series, autolag='AIC')
+        adf_statistic = result[0]
+        p_value = result[1]
+        return adf_statistic, p_value
+
+    def calculate_lagged_correlation(self, lag: int = 1, lookback_days: int = 30) -> Optional[float]:
+        prices1_series = pd.Series(self.normalized_prices.get(self.instrument1.symbol, {})).sort_index().tail(lookback_days).dropna()
+        prices2_series = pd.Series(self.normalized_prices.get(self.instrument2.symbol, {})).sort_index().tail(lookback_days).dropna()
+        if len(prices1_series) < lookback_days - abs(lag) or len(prices2_series) < lookback_days - abs(lag):
+            return None
+        if lag > 0:
+            corr = prices1_series[:-lag].corr(prices2_series[lag:])
+        elif lag < 0:
+            corr = prices1_series[-lag:].corr(prices2_series[:lag])
+        else:
+            corr = prices1_series.corr(prices2_series)
+        return corr
+
+    def calculate_leverage(self, date: dt.date) -> float:
+        portfolio_value = self.portfolio_value_history.get(date, self.config.initial_capital)
+        equity = self.equity
+        if equity != 0:
+            return portfolio_value / equity
+        return 0.0
